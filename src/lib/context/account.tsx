@@ -1,16 +1,22 @@
 "use client";
 
+import { useAppKitAccount } from "@reown/appkit-core/react";
 import { fetchMinaAccount } from "@zkusd/core";
 import { useRouter } from "next/navigation";
 import { PublicKey } from "o1js";
-import { createContext, useContext, useEffect, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 import { useAccountState } from "../hooks/use-account-state";
 import { useClient } from "./client";
 
 interface AccountContextProps {
   account: PublicKey | null;
   isConnected: boolean;
-  connect: () => Promise<void>;
   disconnect: () => void;
   minaBalance: bigint | null;
   zkusdBalance: bigint | null;
@@ -27,7 +33,41 @@ export const AccountProvider = ({
 }) => {
   const { zkusd } = useClient();
   const router = useRouter();
+
   const [account, setAccount] = useState<PublicKey | null>(null);
+  const { address, isConnected } = useAppKitAccount();
+  useEffect(() => {
+    async function initializeAccount() {
+      if (address && zkusd) {
+        try {
+          const publicKey = PublicKey.fromBase58(address);
+          //Lets fetch the balance of the account
+          const minaAccount = await fetchMinaAccount({
+            publicKey,
+            force: true,
+          });
+
+          const zkusdAccount = await fetchMinaAccount({
+            publicKey,
+            tokenId: zkusd.getTokenId("token") ?? 0,
+            force: true,
+          });
+
+          setAccount(publicKey);
+          setMinaBalance(minaAccount.account?.balance.toBigInt() ?? null);
+          setZkusdBalance(zkusdAccount.account?.balance.toBigInt() ?? null);
+          sessionStorage.setItem("wallet-connected", "true");
+        } catch (error) {
+          console.error("Failed to connect account:", error);
+          throw error;
+        } finally {
+          setAccountInitialized(true);
+        }
+      }
+    }
+    initializeAccount();
+  }, [address, zkusd]);
+
   const [minaBalance, setMinaBalance] = useState<bigint | null>(null);
   const [zkusdBalance, setZkusdBalance] = useState<bigint | null>(null);
   const [accountInitialized, setAccountInitialized] = useState(false);
@@ -37,55 +77,11 @@ export const AccountProvider = ({
     zkusd?.getTokenId("token") ?? 0,
   );
 
-  const refetchAccount = async () => {
+  const refetchAccount = useCallback(async () => {
     const { data: accountState } = await refetchAccountState();
     setMinaBalance(accountState?.minaBalance ?? null);
     setZkusdBalance(accountState?.zkusdBalance ?? null);
-  };
-
-  const connect = async () => {
-    try {
-      const accounts = await window.mina?.requestAccounts();
-      if (!accounts || "code" in accounts) {
-        throw new Error("No accounts found");
-      }
-
-      let networkID;
-
-      if (process.env.NEXT_PUBLIC_CHAIN === "lightnet") {
-        networkID = "mina:testnet";
-      } else {
-        networkID = `mina:${process.env.NEXT_PUBLIC_CHAIN}`;
-      }
-
-      await window.mina?.switchChain({
-        networkID,
-      });
-
-      const publicKey = PublicKey.fromBase58(accounts[0]);
-      //Lets fetch the balance of the account
-      const minaAccount = await fetchMinaAccount({
-        publicKey,
-        force: true,
-      });
-
-      const zkusdAccount = await fetchMinaAccount({
-        publicKey,
-        tokenId: zkusd?.getTokenId("token") ?? 0,
-        force: true,
-      });
-
-      setAccount(publicKey);
-      setMinaBalance(minaAccount.account?.balance.toBigInt() ?? null);
-      setZkusdBalance(zkusdAccount.account?.balance.toBigInt() ?? null);
-      sessionStorage.setItem("wallet-connected", "true");
-    } catch (error) {
-      console.error("Failed to connect account:", error);
-      throw error;
-    } finally {
-      setAccountInitialized(true);
-    }
-  };
+  }, [refetchAccountState]);
 
   const disconnect = () => {
     setAccount(null);
@@ -95,19 +91,16 @@ export const AccountProvider = ({
 
   // Auto-connect on mount
   useEffect(() => {
-    if (!zkusd) return;
-    const isConnected = sessionStorage.getItem("wallet-connected") === "true";
-    if (isConnected) {
-      connect().catch(console.error);
-    } else {
+    if (zkusd && !isConnected) {
       setAccountInitialized(true);
       router.push("/");
     }
-  }, [zkusd]);
+  }, [zkusd, isConnected, router]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     refetchAccount();
-  }, [account]);
+  }, [account, refetchAccount]);
 
   return (
     <AccountContext.Provider
@@ -115,8 +108,7 @@ export const AccountProvider = ({
         account,
         minaBalance,
         zkusdBalance,
-        isConnected: !!account,
-        connect,
+        isConnected,
         disconnect,
         refetchAccount,
         accountInitialized,
